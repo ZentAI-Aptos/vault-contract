@@ -1,0 +1,20 @@
+[package]
+name = 'Router'
+version = '1.0.0'
+upgrade_policy = "compatible"
+
+[dependencies.LiquidswapV1]
+local = '..'
+
+[dependencies.AptosFramework]
+git = 'https://github.com/aptos-labs/aptos-core.git'
+rev = 'mainnet'
+subdir = 'aptos-move/framework/aptos-framework'
+
+[dependencies.AptosToken]
+git = 'https://github.com/aptos-labs/aptos-core.git'
+rev = 'mainnet'
+subdir = 'aptos-move/framework/aptos-token'
+
+[addresses]
+liquidswap_v1 = "0xc9ccc585c8e1455a5c0ae4e068897a47e7c16cf16f14e0655e3573c2bbc76d48"
