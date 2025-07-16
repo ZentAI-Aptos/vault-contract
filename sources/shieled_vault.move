@@ -9,12 +9,14 @@ module zentai_vault::shielded_vault {
     use aptos_framework::coin::{Self, Coin};
     use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::account;
+    use std::bcs;
     use aptos_std::ristretto255_bulletproofs as bulletproofs;
     // Add imports for RangeProof and Commitment
     use aptos_std::ristretto255_bulletproofs::RangeProof;
     use aptos_std::ristretto255_pedersen::{Self, Commitment as PedersenCommitment};
     use aptos_std::ristretto255_elgamal as elgamal;
     use aptos_std::ristretto255_pedersen as pedersen;
+    use zentai_vault::vault_verifier;
 
 
     const E_VAULT_ALREADY_INITIALIZED: u64 = 1;
@@ -57,101 +59,111 @@ module zentai_vault::shielded_vault {
         roots: Table<vector<u8>, bool>,
     }
 
-    struct PrivacyVault<phantom CoinType> has key {
+     struct PrivacyVault<phantom CoinType> has key {
         deposits: Coin<CoinType>,
         commitments: Table<u64, Commitment>,
         nullifiers: Table<vector<u8>, bool>,
         merkle_tree: MerkleTree,
-        deposit_events: EventHandle<DepositEvent>,
-        withdraw_events: EventHandle<WithdrawEvent>,
     }
 
 
     /// Withdraws funds from the vault by spending an old commitment and creating a change commitment.
     /// Bulletproofs are used to validate the change commitment.
-     public entry fun withdraw<CoinType>(
-        _account: &signer,
+    public entry fun withdraw<CoinType>(
+        account: &signer, // Đổi tên _account thành account để sử dụng
+        // Các đầu vào công khai cho mạch ZK
         amount: u64,
         recipient: address,
         merkle_root: vector<u8>,
         nullifier_hash: vector<u8>,
         change_commitment_bytes: vector<u8>,
+        // Dữ liệu phụ
         change_ciphertext_bytes: vector<u8>,
-        change_range_proof_bytes: vector<u8>,
-        linking_proof_bytes: vector<u8>,
+        // Bằng chứng và các thành phần của nó dưới dạng chuỗi byte
+        proof_a_bytes: vector<u8>,
+        proof_b_bytes: vector<u8>,
+        proof_c_bytes: vector<u8>,
     ) acquires PrivacyVault {
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
         let vault_addr = @zentai_vault;
         assert!(exists<PrivacyVault<CoinType>>(vault_addr), error::not_found(E_VAULT_NOT_INITIALIZED));
         let vault = borrow_global_mut<PrivacyVault<CoinType>>(vault_addr);
 
-        // 1. Verify Merkle Root and Nullifier
+        // 1. Xác thực Merkle Root và Nullifier (logic nghiệp vụ)
         assert!(table::contains(&vault.merkle_tree.roots, merkle_root), error::invalid_argument(E_INVALID_MERKLE_ROOT));
         assert!(!table::contains(&vault.nullifiers, nullifier_hash), error::invalid_argument(E_NULLIFIER_ALREADY_USED));
 
-        // 2. Deserialize proof structures from bytes
-        let change_commitment = pedersen::new_commitment_from_bytes(change_commitment_bytes);
-        assert!(option::is_some(&change_commitment), error::invalid_argument(E_DESERIALIZATION_FAILED));
-        let change_commitment = option::extract(&mut change_commitment);
-        let change_range_proof = bulletproofs::range_proof_from_bytes(change_range_proof_bytes);
+        // 2. Chuẩn bị các đầu vào công khai cho verifier
+        // Thứ tự phải TUYỆT ĐỐI chính xác với thứ tự trong mạch Circom
+        let public_inputs_bytes = vector[
+            bcs::to_bytes(&merkle_root),
+            bcs::to_bytes(&nullifier_hash),
+            bcs::to_bytes(&recipient),
+            bcs::to_bytes(&amount),
+            bcs::to_bytes(&change_commitment_bytes)
+        ];
 
-        // 3. Verify the range proof (Bulletproof)
-        let is_valid = bulletproofs::verify_range_proof_pedersen(
-            &change_commitment,
-            &change_range_proof,
-            64,
-            BULLETPROOF_DST,
+        // 3. GỌI HÀM XÁC MINH
+        // Toàn bộ sự phức tạp của ZK-SNARK được gói gọn trong một lệnh gọi duy nhất!
+        let is_proof_valid = vault_verifier::verify_withdraw_proof(
+            account, // Truyền signer vào để bật native crypto
+            &public_inputs_bytes,
+            &proof_a_bytes,
+            &proof_b_bytes,
+            &proof_c_bytes,
         );
-        assert!(is_valid, error::permission_denied(E_INVALID_PROOF));
+        assert!(is_proof_valid, error::permission_denied(E_INVALID_PROOF));
 
-        // 4. Placeholder for ZK-SNARK verification
-        assert!(!vector::is_empty(&linking_proof_bytes), error::invalid_argument(E_INVALID_PROOF));
-
-        // 5. Add the change commitment to the vault
-        // Create a copy of `change_commitment_bytes` to pass into `point`.
-        // This way, the original `change_commitment_bytes` can still be used later for `merkle_insert`.
+        // 4. Cập nhật trạng thái vault nếu bằng chứng hợp lệ
         let new_commitment = Commitment {
-            point: *&change_commitment_bytes, // Use *& to copy the vector
+            point: change_commitment_bytes,
             ciphertext: change_ciphertext_bytes,
         };
         let new_commitment_index = vault.merkle_tree.next_index;
-
-        // Move `new_commitment` into the table. After this line, `new_commitment` is no longer valid.
         table::add(&mut vault.commitments, new_commitment_index, new_commitment);
-
-        // Use the original `change_commitment_bytes` (which was never moved) to insert into the Merkle tree.
         merkle_insert(&mut vault.merkle_tree, change_commitment_bytes);
         
-        // 6. Mark the nullifier as used and transfer funds
         table::add(&mut vault.nullifiers, nullifier_hash, true);
         let withdrawn_coins = coin::extract(&mut vault.deposits, amount);
         coin::deposit(recipient, withdrawn_coins);
     }
-
-
-    public entry fun initialize_vault<CoinType>(deployer: &signer) {
+    
+    // Cần cập nhật `initialize_vault` để gọi `vault_verifier::initialize`
+    public entry fun initialize_vault<CoinType>(
+        deployer: &signer,
+        // Thêm các tham số VK để khởi tạo verifier
+        vk_alpha_g1_bytes: vector<u8>,
+        vk_beta_g2_bytes: vector<u8>,
+        vk_gamma_g2_bytes: vector<u8>,
+        vk_delta_g2_bytes: vector<u8>,
+        vk_uvw_gamma_g1_bytes: vector<vector<u8>>,
+    ) {
         let deployer_addr = signer::address_of(deployer);
         assert!(!exists<PrivacyVault<CoinType>>(deployer_addr), error::already_exists(E_VAULT_ALREADY_INITIALIZED));
+        
+        // Khởi tạo verifier với Khóa Xác Minh
+        vault_verifier::initialize(
+            deployer,
+            vk_alpha_g1_bytes,
+            vk_beta_g2_bytes,
+            vk_gamma_g2_bytes,
+            vk_delta_g2_bytes,
+            vk_uvw_gamma_g1_bytes,
+        );
+
+        // Khởi tạo vault như cũ
         let levels = vector[];
         let i = 0;
         while (i <= MERKLE_TREE_DEPTH) {
             vector::push_back(&mut levels, vector[]);
             i = i + 1;
         };
-        let tree = MerkleTree {
-            levels,
-            next_index: 0,
-            roots: table::new(),
-        };
-        let deposit_events = account::new_event_handle<DepositEvent>(deployer);
-        let withdraw_events = account::new_event_handle<WithdrawEvent>(deployer);
+        let tree = MerkleTree { levels, next_index: 0, roots: table::new() };
         let vault = PrivacyVault<CoinType> {
             deposits: coin::zero<CoinType>(),
             commitments: table::new(),
             nullifiers: table::new(),
             merkle_tree: tree,
-            deposit_events,
-            withdraw_events,
         };
         move_to(deployer, vault);
     }
