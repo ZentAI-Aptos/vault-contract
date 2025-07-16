@@ -1,11 +1,6 @@
 module zentai_vault::groth16_verifier {
     use aptos_std::crypto_algebra::{Element, from_u64, multi_scalar_mul, eq, multi_pairing, upcast, pairing, add, zero, neg};
 
-    // ... (Toàn bộ mã nguồn của module `groth16_example::groth16` bạn đã cung cấp sẽ nằm ở đây)
-    // Tôi sẽ chỉ giữ lại hàm quan trọng nhất mà chúng ta sẽ sử dụng.
-
-    /// Modified proof verification which is optimized for low verification latency
-    /// but requires a pairing and 2 `G2` negations to be pre-computed.
     public fun verify_proof_prepared<G1,G2,Gt,S>(
         pvk_alpha_g1_beta_g2: &Element<Gt>,
         pvk_gamma_g2_neg: &Element<G2>,
